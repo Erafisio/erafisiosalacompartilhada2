@@ -1,0 +1,959 @@
+<script>
+// ==========================================
+// CONFIGURAÇÃO DA NUVEM
+// ==========================================
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzb2oXVfhnOGyYLIr2d05O30eMBQpC9hZLzWEhhpePsbLBNRXxGvPUico9W5o9Ahd0fnA/exec";
+
+const CONTRA_SENHA_SISTEMA = "EDISONAPPARECIDO";
+const HORARIOS = Array.from({length: 15}, (_, i) => i + 7);
+
+let state = {
+    profissionais: [],
+    bookings: [],
+    deletions: [],
+    salas: [
+        {nome: 'Sala 1', apelido: 'Geral', valor: 65},
+        {nome: 'Sala 2', apelido: 'Pilates', valor: 85},
+        {nome: 'Sala 3', apelido: 'RPG', valor: 75},
+        {nome: 'Sala 4', apelido: 'Consulta', valor: 60}
+    ],
+    config: { adminPass: 'Pfisio1234#', masterKey: '3ftiva#' },
+    currentDate: new Date(),
+    currentView: 'dia',
+    editingId: null,
+    userIp: 'Detectando...'
+};
+
+let chartSalasInstance = null;
+
+const STATUS_COLORS = {
+    confirmado: '#ffffff',
+    pendente: '#fff3cd',
+    finalizado: '#d4edda',
+    falta: '#f8d7da'
+};
+
+// ====================== MOTOR NUVEM ======================
+async function fetchFromCloud() {
+    if (!confirm("⚠️ Atenção!\n\nEsta ação vai buscar os dados mais recentes da nuvem.\nQualquer alteração local não sincronizada será perdida.\n\nDeseja continuar?")) {
+        return;
+    }
+
+    const status = document.getElementById('cloud-status');
+    status.className = 'sync-active';
+    status.innerText = '☁️ SINCRONIZANDO COM NUVEM...';
+
+    try {
+        const response = await fetch(SCRIPT_URL, { 
+            method: 'GET', 
+            cache: 'no-store',
+            headers: {
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+
+        const data = await response.json();
+
+        // Mantém a data e visão atual do usuário
+        const tempDate = state.currentDate;
+        const tempView = state.currentView;
+
+        // Atualiza o estado com dados da nuvem
+        if (data.profissionais) state.profissionais = data.profissionais;
+        if (data.bookings) state.bookings = data.bookings;
+        if (data.deletions) state.deletions = data.deletions;
+        if (data.salas && data.salas.length > 0) state.salas = data.salas;
+        if (data.config) state.config = data.config;
+
+        // Restaura a data e visão
+        state.currentDate = tempDate;
+        state.currentView = tempView;
+
+        // Atualiza a UI
+        populateSelectors();
+        render();
+        updateStats();
+
+        status.style.backgroundColor = 'var(--secondary)';
+        status.innerText = '✅ SINCRONIZADO!';
+        setTimeout(() => {
+            status.className = '';
+            status.style.backgroundColor = '';
+        }, 2000);
+
+    } catch (e) {
+        console.error("Erro no fetchFromCloud:", e);
+        const status = document.getElementById('cloud-status');
+        status.className = '';
+        status.style.backgroundColor = 'var(--danger)';
+        status.innerText = '❌ ERRO NA NUVEM';
+        status.style.display = 'block';
+        
+        // Tenta carregar do localStorage como fallback
+        loadFromLocalStorage();
+        
+        alert("Não foi possível carregar os dados da nuvem.\nTentando carregar dados locais...\n\nVerifique se o Web App está implantado com acesso 'Qualquer pessoa'.");
+    }
+}
+
+async function saveToCloud() {
+    const status = document.getElementById('cloud-status');
+    status.style.display = 'block';
+    status.className = 'sync-active';
+    status.innerText = '☁️ SALVANDO...';
+    
+    try {
+        // Salva no localStorage primeiro (backup local)
+        localStorage.setItem('fs_profs_v6.1', JSON.stringify(state.profissionais));
+        localStorage.setItem('fs_books_v6.1', JSON.stringify(state.bookings));
+        localStorage.setItem('fs_deletions_v6.1', JSON.stringify(state.deletions));
+        localStorage.setItem('fs_salas_v6.1', JSON.stringify(state.salas));
+        localStorage.setItem('fs_config_v6.1', JSON.stringify(state.config));
+
+        // Envia para a nuvem
+        const response = await fetch(SCRIPT_URL, {
+            method: 'POST',
+            headers: { 
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(state)
+        });
+
+        if (!response.ok) {
+            throw new Error('Erro HTTP: ' + response.status);
+        }
+
+        const result = await response.json();
+        console.log('Dados salvos na nuvem:', result);
+
+        status.style.backgroundColor = 'var(--secondary)';
+        status.innerText = '✅ SALVO!';
+        setTimeout(() => {
+            status.className = '';
+            status.style.backgroundColor = '';
+            status.style.display = 'none';
+        }, 1500);
+
+    } catch (e) {
+        console.error("Erro ao salvar na nuvem:", e);
+        status.style.backgroundColor = 'var(--danger)';
+        status.innerText = '❌ ERRO AO SALVAR';
+        alert("Erro ao salvar na nuvem. Os dados foram mantidos localmente.\n\nErro: " + e.message);
+    }
+}
+
+function loadFromLocalStorage() {
+    try {
+        const profs = localStorage.getItem('fs_profs_v6.1');
+        const books = localStorage.getItem('fs_books_v6.1');
+        const dels = localStorage.getItem('fs_deletions_v6.1');
+        const salas = localStorage.getItem('fs_salas_v6.1');
+        const config = localStorage.getItem('fs_config_v6.1');
+
+        if (profs) state.profissionais = JSON.parse(profs);
+        if (books) state.bookings = JSON.parse(books);
+        if (dels) state.deletions = JSON.parse(dels);
+        if (salas) state.salas = JSON.parse(salas);
+        if (config) state.config = JSON.parse(config);
+        
+        populateSelectors();
+        render();
+        updateStats();
+    } catch (e) {
+        console.error("Erro ao carregar do localStorage:", e);
+    }
+}
+
+// ====================== FUNÇÕES AUXILIARES ======================
+function getSalaDisplayName(salaObj) {
+    if (!salaObj) return "Sala Excluída";
+    return salaObj.apelido ? `${salaObj.nome} - ${salaObj.apelido}` : salaObj.nome;
+}
+
+function isPilates(salaName) {
+    return salaName.toLowerCase().includes('pilates');
+}
+
+function toggleRecurrent(checked) {
+    document.getElementById('recurrent-options').style.display = checked ? 'block' : 'none';
+}
+
+function updateBookingValueDisplay() {
+    const sala = document.getElementById('f-sala').value || '';
+    const segundoSelect = document.getElementById('f-segundo-prof');
+    
+    if (isPilates(sala)) {
+        document.getElementById('shared-section').style.display = 'block';
+        populateSegundoProfSelect();
+    } else {
+        document.getElementById('shared-section').style.display = 'none';
+    }
+}
+
+function populateSegundoProfSelect() {
+    const principalId = parseInt(document.getElementById('f-prof').value) || 0;
+    const select = document.getElementById('f-segundo-prof');
+    
+    let options = '<option value="">-- Nenhum (opcional) --</option>';
+    
+    state.profissionais.forEach(p => {
+        if (p.id !== principalId) {
+            options += `<option value="${p.id}">${p.nome}</option>`;
+        }
+    });
+    
+    select.innerHTML = options;
+}
+
+// ====================== ESTATÍSTICAS ======================
+function updateStats() {
+    const todayStr = state.currentDate.toISOString().split('T')[0];
+    const now = new Date();
+    const confirmed = state.bookings.filter(b => b.status === 'confirmado');
+    
+    const filteredMes = confirmed.filter(b => {
+        const d = new Date(b.date + 'T00:00:00');
+        return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+    });
+    
+    const horasMes = filteredMes.reduce((acc, b) => acc + b.totalH, 0);
+
+    document.getElementById('stat-total-profs').innerText = state.profissionais.length;
+    document.getElementById('stat-books-today').innerText = state.bookings.filter(b => b.date === todayStr).length;
+    document.getElementById('stat-hours-month').innerText = horasMes + 'h';
+
+    const statsContainer = document.getElementById('stats-container');
+    document.querySelectorAll('.stat-dynamic').forEach(el => el.remove());
+
+    state.salas.forEach(s => {
+        const name = getSalaDisplayName(s);
+        const horasHoje = confirmed.filter(b => b.date === todayStr && b.sala === name).reduce((a,b) => a+b.totalH, 0);
+        const perc = ((horasHoje / 15) * 100).toFixed(0);
+        const div = document.createElement('div');
+        div.className = 'stat-item stat-dynamic';
+        div.innerHTML = `<span class="stat-val" style="color:var(--info)">${perc}%</span><span class="stat-lbl">Ocup. ${s.nome}</span>`;
+        statsContainer.appendChild(div);
+    });
+}
+
+// ====================== ADMIN & FINANCEIRO ======================
+function refreshAdminData() {
+    const period = document.getElementById('adm-period').value;
+    const now = new Date();
+    let filtered = [...state.bookings];
+    
+    if (period === 'mes') {
+        filtered = filtered.filter(b => {
+            const d = new Date(b.date + 'T00:00:00');
+            return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+        });
+    }
+
+    const confirmed = filtered.filter(b => b.status === 'confirmado');
+    const totalFaturamento = confirmed.reduce((acc, b) => acc + (b.totalH * (b.valorHoraAplicado || 65)), 0);
+    document.getElementById('adm-total-faturamento').innerText = `R$ ${totalFaturamento.toLocaleString('pt-BR', {minimumFractionDigits: 2})}`;
+
+    document.getElementById('admin-rateio-body').innerHTML = state.profissionais.map(p => {
+        const pBooks = confirmed.filter(b => b.profId === p.id);
+        const h = pBooks.reduce((acc, b) => acc + b.totalH, 0);
+        const pFat = pBooks.reduce((acc, b) => acc + (b.totalH * (b.valorHoraAplicado || 65)), 0);
+        return `<tr><td><strong>${p.nome}</strong></td><td>${h}h</td><td style="color:var(--secondary); font-weight:bold;">R$ ${pFat.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</td><td>${pBooks.length ? pBooks.sort((a,b) => b.date.localeCompare(a.date))[0].date : '---'}</td></tr>`;
+    }).join('');
+
+    const startOfWeek = new Date(now); 
+    startOfWeek.setDate(now.getDate() - now.getDay());
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    
+    document.getElementById('dash-rep1').innerHTML = state.salas.map(s => {
+        const n = getSalaDisplayName(s);
+        const hSemana = confirmed.filter(b => b.sala === n && new Date(b.date) >= startOfWeek).reduce((a,b) => a+b.totalH, 0);
+        const hMes = confirmed.filter(b => b.sala === n && new Date(b.date) >= startOfMonth).reduce((a,b) => a+b.totalH, 0);
+        return `<tr><td>${s.nome}</td><td>${((hSemana/(15*7))*100).toFixed(1)}%</td><td>${((hMes/(15*30))*100).toFixed(1)}%</td></tr>`;
+    }).join('');
+
+    document.getElementById('dash-rep2').innerHTML = state.salas.map(s => {
+        const n = getSalaDisplayName(s);
+        const unique = new Set(state.bookings.filter(b => b.sala === n && b.patient).map(b => b.patient.toLowerCase().trim()));
+        return `<tr><td>${s.nome}</td><td>${unique.size}</td></tr>`;
+    }).join('');
+
+    document.getElementById('dash-rep3').innerHTML = state.profissionais.map(p => {
+        const faltas = state.bookings.filter(b => b.profId === p.id && b.status === 'falta').length;
+        return `<tr><td>${p.nome}</td><td>${faltas}</td></tr>`;
+    }).join('');
+
+    const totalGeral = state.bookings.reduce((a,b) => a + b.totalH, 0) || 1;
+    document.getElementById('dash-rep4').innerHTML = state.profissionais.map(p => {
+        const hProf = state.bookings.filter(b => b.profId === p.id).reduce((a,b) => a+b.totalH, 0);
+        return `<tr><td>${p.nome}</td><td>${((hProf/totalGeral)*100).toFixed(1)}%</td></tr>`;
+    }).join('');
+
+    // AUDITORIA
+    let auditHTML = state.bookings.sort((a,b) => b.id - a.id).slice(0, 50).map(b => `
+        <tr style="background:#d4edda">
+            <td>${b.createdAt || '---'}</td>
+            <td><strong>CRIAÇÃO</strong></td>
+            <td>${b.profNome} ${b.segundoProfNome ? `+ ${b.segundoProfNome}` : ''}</td>
+            <td>${b.sala} em ${b.date}</td>
+            <td style="color:var(--danger)">${b.ip || '---'}</td>
+        </tr>`).join('');
+        
+    auditHTML += state.deletions.sort((a,b) => new Date(b.deletedAt) - new Date(a.deletedAt)).slice(0, 50).map(d => `
+        <tr style="background:#f8d7da">
+            <td>${d.deletedAt}</td>
+            <td><strong>EXCLUSÃO</strong> por ${d.deletedBy}</td>
+            <td>${d.profNome} ${d.segundoProfNome ? `+ ${d.segundoProfNome}` : ''}</td>
+            <td>${d.sala} em ${d.date}</td>
+            <td style="color:var(--danger)">${d.ip || '---'}</td>
+        </tr>`).join('');
+        
+    document.getElementById('admin-audit-body').innerHTML = auditHTML;
+}
+
+// ====================== TABELA DE OCUPAÇÃO ======================
+function refreshOcupacaoTable() {
+    const todayStr = state.currentDate.toISOString().split('T')[0];
+    const now = new Date();
+    const confirmed = state.bookings.filter(b => b.status === 'confirmado');
+
+    const startOfWeek = new Date(now);
+    startOfWeek.setDate(now.getDate() - now.getDay());
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+
+    let html = '';
+    state.salas.forEach(s => {
+        const name = getSalaDisplayName(s);
+        
+        const horasHoje = confirmed.filter(b => b.date === todayStr && b.sala === name).reduce((a,b) => a + b.totalH, 0);
+        const percHoje = ((horasHoje / 15) * 100).toFixed(0);
+
+        const horasSemana = confirmed.filter(b => b.sala === name && new Date(b.date) >= startOfWeek).reduce((a,b) => a + b.totalH, 0);
+        const percSemana = ((horasSemana / (15 * 7)) * 100).toFixed(1);
+
+        const horasMes = confirmed.filter(b => b.sala === name && new Date(b.date) >= startOfMonth).reduce((a,b) => a + b.totalH, 0);
+        const percMes = ((horasMes / (15 * 30)) * 100).toFixed(1);
+
+        html += `<tr>
+            <td><strong>${s.nome}</strong></td>
+            <td>${percHoje}%</td>
+            <td>${percSemana}%</td>
+            <td>${percMes}%</td>
+        </tr>`;
+    });
+
+    document.getElementById('ocupacao-body').innerHTML = html || '<tr><td colspan="4" style="text-align:center; padding:30px;">Nenhuma reserva confirmada ainda.</td></tr>';
+}
+
+// ====================== PROCESSAR RESERVA ======================
+function processBooking() {
+    const pId = parseInt(document.getElementById('f-prof').value);
+    const prof = state.profissionais.find(p => p.id === pId);
+    const auth = document.getElementById('f-auth').value;
+
+    if (auth !== state.config.adminPass && 
+        auth !== state.config.masterKey && 
+        (prof && auth !== prof.pass)) {
+        return alert("Senha incorreta.");
+    }
+    
+    const start = parseInt(document.getElementById('f-start').value);
+    const end = parseInt(document.getElementById('f-end').value);
+    if (end <= start) return alert("Horário inválido.");
+    
+    const salaNome = document.getElementById('f-sala').value;
+    const salaObj = state.salas.find(s => getSalaDisplayName(s) === salaNome);
+    const dataAlvo = document.getElementById('f-date').value;
+    
+    const segundoId = parseInt(document.getElementById('f-segundo-prof').value) || null;
+    const segundoProf = segundoId ? state.profissionais.find(p => p.id === segundoId) : null;
+
+    const isRecurrent = document.getElementById('f-recurrent').checked && !state.editingId;
+    const numWeeks = isRecurrent ? parseInt(document.getElementById('f-recurrent-weeks').value) : 0;
+
+    const baseData = { 
+        profId: pId, 
+        profNome: prof.nome, 
+        patient: document.getElementById('f-patient').value.trim(),
+        status: document.getElementById('f-status').value,
+        obs: document.getElementById('f-obs').value.trim(),
+        sala: salaNome, 
+        valorHoraAplicado: salaObj ? salaObj.valor : 65,
+        hStart: start, 
+        hEnd: end, 
+        totalH: end - start, 
+        createdAt: new Date().toLocaleString(), 
+        ip: state.userIp,
+        segundoProfId: segundoId,
+        segundoProfNome: segundoProf ? segundoProf.nome : ''
+    };
+
+    let bookingsToCreate = [];
+
+    if (!isRecurrent || state.editingId) {
+        const data = { id: state.editingId || Date.now(), date: dataAlvo, ...baseData };
+        const conflito = state.bookings.some(b => b.id !== state.editingId && b.date === dataAlvo && b.sala === salaNome && 
+            ((start >= b.hStart && start < b.hEnd) || (end > b.hStart && end <= b.hEnd) || (start <= b.hStart && end >= b.hEnd)));
+        if (conflito) return alert("Conflito de horário detectado.");
+        bookingsToCreate.push(data);
+    } else {
+        let success = true;
+        for (let i = 0; i < numWeeks; i++) {
+            const bookingDate = new Date(dataAlvo);
+            bookingDate.setDate(bookingDate.getDate() + 7 * i);
+            const newDateStr = bookingDate.toISOString().split('T')[0];
+
+            const conflito = state.bookings.some(b => b.date === newDateStr && b.sala === salaNome && 
+                ((start >= b.hStart && start < b.hEnd) || (end > b.hStart && end <= b.hEnd) || (start <= b.hStart && end >= b.hEnd)));
+            if (conflito) {
+                alert(`Conflito detectado na data ${newDateStr}. Recorrência cancelada.`);
+                success = false;
+                break;
+            }
+            bookingsToCreate.push({ id: Date.now() + i, date: newDateStr, ...baseData });
+        }
+        if (!success) return;
+    }
+
+    if (state.editingId) {
+        state.bookings = state.bookings.map(b => b.id === state.editingId ? bookingsToCreate[0] : b);
+    } else {
+        state.bookings = [...state.bookings, ...bookingsToCreate];
+    }
+    
+    saveToCloud(); 
+    closeModal('modal-booking'); 
+    render();
+    alert("✅ Reserva cadastrada com sucesso!");
+}
+
+function checkPermission(bookingId, action) {
+    const b = state.bookings.find(x => x.id === bookingId);
+    if (!b) return false;
+    
+    const pass = prompt(`Senha ${action} (do criador ou Admin):`);
+    const prof = state.profissionais.find(p => p.id === b.profId);
+    
+    if (pass === state.config.adminPass || (prof && pass === prof.pass)) {
+        return true;
+    }
+    alert("Senha incorreta ou sem permissão.");
+    return false;
+}
+
+function editBooking(id) {
+    if (!checkPermission(id, "para editar")) return;
+    const b = state.bookings.find(x => x.id === id); 
+    state.editingId = id; 
+    openModal('modal-booking'); 
+    
+    document.getElementById('f-prof').value = b.profId; 
+    document.getElementById('f-sala').value = b.sala; 
+    document.getElementById('f-date').value = b.date; 
+    document.getElementById('f-start').value = b.hStart; 
+    document.getElementById('f-end').value = b.hEnd; 
+    document.getElementById('f-patient').value = b.patient || '';
+    document.getElementById('f-obs').value = b.obs || '';
+    document.getElementById('f-status').value = b.status || 'confirmado';
+    document.getElementById('f-auth').value = ''; 
+    
+    document.getElementById('f-recurrent').checked = false;
+    document.getElementById('f-recurrent').disabled = true;
+    document.getElementById('recurrent-options').style.display = 'none';
+    
+    if (b.segundoProfId && isPilates(b.sala)) {
+        document.getElementById('f-segundo-prof').value = b.segundoProfId;
+    }
+    updateBookingValueDisplay();
+}
+
+function deleteBooking(id) {
+    const b = state.bookings.find(x => x.id === id);
+    if (!b || !checkPermission(id, "para excluir")) return;
+    
+    const deletedByName = state.config.adminPass === prompt("Confirme sua senha para exclusão:") ? "Administrador" : b.profNome;
+    
+    state.deletions.push({
+        id: Date.now(),
+        originalId: id,
+        profNome: b.profNome,
+        segundoProfNome: b.segundoProfNome || '',
+        sala: b.sala,
+        date: b.date,
+        deletedBy: deletedByName,
+        deletedAt: new Date().toLocaleString('pt-BR'),
+        ip: state.userIp
+    });
+    
+    state.bookings = state.bookings.filter(x => x.id !== id); 
+    saveToCloud(); 
+    render(); 
+}
+
+// ====================== RENDER ======================
+function render() {
+    const container = document.getElementById('main-content');
+    const dateStr = state.currentDate.toISOString().split('T')[0];
+    const searchVal = document.getElementById('search-prof').value.toLowerCase();
+    
+    if (state.currentView === 'dia') {
+        if (!state.salas.length) {
+            container.innerHTML = `<p style="padding:40px; text-align:center; color:var(--danger);">Nenhuma sala cadastrada.<br> Vá em Administração → Config. Salas e adicione as salas.</p>`;
+            return;
+        }
+
+        let html = `<table><thead><tr><th>Hora</th>` + state.salas.map(s => {
+            const fullSalaName = getSalaDisplayName(s);
+            const horasHoje = state.bookings.filter(b => b.date === dateStr && b.sala === fullSalaName).reduce((a,b) => a+b.totalH, 0);
+            const p = ((horasHoje/15)*100).toFixed(0);
+            return `<th>${fullSalaName} <span class="room-occupancy-badge">${p}%</span></th>`;
+        }).join('') + `</tr></thead><tbody>`;
+        
+        HORARIOS.forEach(h => {
+            html += `<tr><td style="font-weight:bold; background:var(--surface2)">${h}:00</td>`;
+            state.salas.forEach((salaObj, index) => {
+                const fullSalaName = getSalaDisplayName(salaObj);
+                const b = state.bookings.find(x => x.date === dateStr && x.sala === fullSalaName && h >= x.hStart && h < x.hEnd);
+                if (b && h === b.hStart) {
+                    const colorIdx = (index % 8) + 1;
+                    const statusBg = STATUS_COLORS[b.status] || '#ffffff';
+                    const isHighlight = searchVal !== "" && b.profNome.toLowerCase().includes(searchVal);
+                    html += `<td rowspan="${b.totalH}">
+                        <div class="slot-booked ${isHighlight ? 'highlight' : ''}" style="background:var(--sala${colorIdx}); background-color:${statusBg}" onclick="editBooking(${b.id})">
+                            ${b.profNome.split(' ')[0]}
+                            ${b.patient ? `<div class="patient-name">${b.patient}</div>` : ''}
+                            ${b.segundoProfNome ? `<div class="patient-name" style="color:var(--secondary)">+ ${b.segundoProfNome}</div>` : ''}
+                            <span class="status-tag">${b.status.toUpperCase()}</span>
+                            <button class="delete-btn" onclick="event.stopPropagation(); deleteBooking(${b.id})">✕</button>
+                        </div>
+                    </td>`;
+                } else if (!state.bookings.some(x => x.date === dateStr && x.sala === fullSalaName && h > x.hStart && h < x.hEnd)) {
+                    html += `<td onclick="openBooking('${dateStr}', ${h}, '${fullSalaName}')" style="opacity:0.3; cursor:pointer;">+</td>`;
+                }
+            });
+            html += `</tr>`;
+        });
+        container.innerHTML = html + `</tbody></table>`;
+    } 
+    else if (state.currentView === 'semana') {
+        let html = `<table><thead><tr><th>Hora</th>`;
+        for(let i=0; i<7; i++) {
+            let d = new Date(state.currentDate); d.setDate(d.getDate() + i);
+            html += `<th>${d.toLocaleDateString('pt-BR', {weekday:'short', day:'numeric'})}</th>`;
+        }
+        html += `</tr></thead><tbody>`;
+        HORARIOS.forEach(h => {
+            html += `<tr><td style="font-weight:bold">${h}:00</td>`;
+            for(let i=0; i<7; i++) {
+                let d = new Date(state.currentDate); d.setDate(d.getDate() + i);
+                let dStr = d.toISOString().split('T')[0];
+                let daily = state.bookings.filter(x => x.date === dStr && h >= x.hStart && h < x.hEnd);
+                html += `<td>${daily.map(b => `<div style="font-size:9px; background:var(--surface2); margin-bottom:2px; padding:2px;">${b.sala.substring(0,8)}: ${b.profNome.split(' ')[0]}${b.segundoProfNome ? ` +${b.segundoProfNome.split(' ')[0]}` : ''}</div>`).join('')}</td>`;
+            }
+            html += `</tr>`;
+        });
+        container.innerHTML = html + `</tbody></table>`;
+    }
+    else {
+        const list = state.bookings.filter(b => b.date >= dateStr).sort((a,b) => a.date.localeCompare(b.date));
+        container.innerHTML = `<table><thead><tr><th>Data</th><th>Sala</th><th>Profissional</th><th>2º Prof.</th><th>Paciente</th><th>Status</th><th>Ações</th></tr></thead><tbody>${list.map(b => `<tr><td>${b.date}</td><td>${b.sala}</td><td>${b.profNome}</td><td>${b.segundoProfNome || '--'}</td><td>${b.patient || '--'}</td><td>${b.status}</td><td><button class="btn btn-danger" onclick="deleteBooking(${b.id})">X</button></td></tr>`).join('')}</tbody></table>`;
+    }
+    updateStats();
+}
+
+function populateSelectors() {
+    document.getElementById('f-prof').innerHTML = state.profissionais.map(p => `<option value="${p.id}">${p.nome}</option>`).join('');
+    document.getElementById('f-sala').innerHTML = state.salas.map(s => `<option value="${getSalaDisplayName(s)}">${getSalaDisplayName(s)}</option>`).join('');
+    document.getElementById('exp-sala').innerHTML = `<option value="todas">Todas as Salas</option>` + state.salas.map(s => `<option value="${getSalaDisplayName(s)}">${getSalaDisplayName(s)}</option>`).join('');
+    const h = HORARIOS.map(hr => `<option value="${hr}">${hr}:00</option>`).join('');
+    document.getElementById('f-start').innerHTML = h; 
+    document.getElementById('f-end').innerHTML = h;
+}
+
+// ====================== BACKUP ======================
+function exportBackup() {
+    const backupData = { 
+        ...state, 
+        exportDate: new Date().toLocaleString() 
+    };
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(backupData, null, 2));
+    const dl = document.createElement('a'); 
+    dl.setAttribute("href", dataStr); 
+    dl.setAttribute("download", `backup_fisiosalas_CLOUD_${new Date().toISOString().split('T')[0]}.json`); 
+    dl.click();
+}
+
+function importBackup(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = function(e) {
+        try {
+            const data = JSON.parse(e.target.result);
+            if (confirm("ATENÇÃO: Isso vai substituir TODOS os dados atuais na nuvem. Deseja continuar?")) {
+                state.profissionais = data.profissionais || []; 
+                state.bookings = data.bookings || [];
+                state.deletions = data.deletions || [];
+                state.salas = data.salas || []; 
+                state.config = data.config || state.config;
+                saveToCloud(); 
+                populateSelectors(); 
+                render(); 
+                refreshAdminData(); 
+                closeModal('modal-admin');
+                alert("Backup restaurado com sucesso!");
+            }
+        } catch (err) { 
+            alert("Arquivo inválido ou corrompido."); 
+        }
+    };
+    reader.readAsText(file);
+}
+
+// ====================== RELATÓRIOS ======================
+function processExport(download = false) { 
+    const period = document.getElementById('exp-period').value;
+    const salaFiltro = document.getElementById('exp-sala').value;
+    let filtered = [...state.bookings];
+    if (period === 'dia') filtered = filtered.filter(b => b.date === new Date().toISOString().split('T')[0]);
+    if (salaFiltro !== 'todas') filtered = filtered.filter(b => b.sala === salaFiltro);
+    
+    document.getElementById('export-preview-body').innerHTML = filtered.map(b => `
+        <tr>
+            <td>${b.sala}</td>
+            <td>${b.hStart}h-${b.hEnd}h</td>
+            <td>${b.profNome}</td>
+            <td>${b.date}</td>
+        </tr>
+    `).join('');
+    
+    if (download) {
+        const { jsPDF } = window.jspdf; 
+        const doc = jsPDF(); 
+        doc.text("FisioSalas v6.1 Cloud - Relatório de Atendimentos", 14, 15);
+        doc.autoTable({ 
+            startY: 25, 
+            head: [['Sala', 'Horário', 'Profissional', 'Paciente', 'Status', 'Data']], 
+            body: filtered.map(b => [b.sala, `${b.hStart}h-${b.hEnd}h`, b.profNome, b.patient || '--', b.status, b.date]) 
+        });
+        doc.save(`FisioSalas_Relatorio_${new Date().toISOString().split('T')[0]}.pdf`);
+    }
+}
+
+// ====================== MODAIS ======================
+function openModal(id) { 
+    document.getElementById(id).classList.add('active'); 
+    if(id === 'modal-prof') renderProfList(); 
+    if(id === 'modal-admin') refreshAdminData(); 
+    if(id === 'modal-booking') {
+        document.getElementById('book-title').innerText = state.editingId ? "Editar Reserva" : "Nova Reserva";
+    }
+}
+
+function closeModal(id) { 
+    document.getElementById(id).classList.remove('active'); 
+    if (id === 'modal-booking') {
+        state.editingId = null;
+    }
+}
+
+// ====================== NAVEGAÇÃO ======================
+function changeDate(d) { 
+    state.currentDate.setDate(state.currentDate.getDate() + d); 
+    updateDate(state.currentDate.toISOString().split('T')[0]); 
+}
+
+function goToday() { 
+    updateDate(new Date().toISOString().split('T')[0]); 
+}
+
+function toggleTheme() { 
+    const d = document.documentElement; 
+    d.setAttribute('data-theme', d.getAttribute('data-theme') === 'dark' ? 'light' : 'dark'); 
+}
+
+function changeView(v) { 
+    state.currentView = v; 
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.toggle('active', b.id === `btn-view-${v}`)); 
+    render(); 
+}
+
+function updateDate(val) { 
+    state.currentDate = new Date(val + 'T00:00:00'); 
+    document.getElementById('date-picker').value = val; 
+    document.getElementById('current-label').innerText = state.currentDate.toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' }); 
+    render(); 
+}
+
+function filterGrid(term) {
+    const termClean = term.toLowerCase().trim();
+    const slots = document.querySelectorAll('.slot-booked');
+    slots.forEach(slot => {
+        const text = slot.innerText.toLowerCase();
+        if (termClean !== "" && text.includes(termClean)) {
+            slot.classList.add('highlight');
+            slot.style.opacity = "1";
+        } else if (termClean !== "") {
+            slot.classList.remove('highlight');
+            slot.style.opacity = "0.2";
+        } else {
+            slot.classList.remove('highlight');
+            slot.style.opacity = "1";
+        }
+    });
+}
+
+// ====================== GESTÃO DE SALAS ======================
+function saveSala() {
+    const nome = document.getElementById('new-sala-name').value.trim();
+    const apelido = document.getElementById('new-sala-nick').value.trim();
+    const valor = parseFloat(document.getElementById('new-sala-value').value) || 65;
+    const idx = parseInt(document.getElementById('edit-sala-idx').value);
+    
+    if (!nome) return alert("Digite o nome da sala.");
+
+    if (idx === -1) {
+        if (state.salas.some(s => s.nome.toLowerCase() === nome.toLowerCase())) return alert("Sala já existe.");
+        state.salas.push({ nome, apelido, valor });
+    } else {
+        const oldName = getSalaDisplayName(state.salas[idx]);
+        state.salas[idx] = { nome, apelido, valor };
+        const newName = getSalaDisplayName(state.salas[idx]);
+        if (oldName !== newName) {
+            state.bookings = state.bookings.map(b => (b.sala === oldName ? { ...b, sala: newName } : b));
+        }
+    }
+    saveToCloud(); 
+    resetSalaForm(); 
+    renderSalasList(); 
+    populateSelectors(); 
+    render();
+}
+
+function renderSalasList() {
+    document.getElementById('admin-salas-body').innerHTML = state.salas.map((s, idx) => `
+        <tr>
+            <td><strong>${s.nome}</strong></td>
+            <td>${s.apelido || '--'}</td>
+            <td>R$ ${s.valor.toFixed(2)}</td>
+            <td>
+                <button class="btn btn-primary" onclick="editSala(${idx})">Editar</button> 
+                <button class="btn btn-danger" onclick="removeSala(${idx})">X</button>
+            </td>
+        </tr>
+    `).join('');
+}
+
+function editSala(index) {
+    const s = state.salas[index];
+    document.getElementById('edit-sala-idx').value = index;
+    document.getElementById('new-sala-name').value = s.nome;
+    document.getElementById('new-sala-nick').value = s.apelido;
+    document.getElementById('new-sala-value').value = s.valor;
+    document.getElementById('sala-form-title').innerText = "Editar Sala";
+    document.getElementById('btn-cancel-sala').style.display = "inline-flex";
+}
+
+function resetSalaForm() {
+    document.getElementById('edit-sala-idx').value = "-1";
+    document.getElementById('new-sala-name').value = "";
+    document.getElementById('new-sala-nick').value = "";
+    document.getElementById('new-sala-value').value = "65";
+    document.getElementById('sala-form-title').innerText = "Adicionar Nova Sala";
+    document.getElementById('btn-cancel-sala').style.display = "none";
+}
+
+function removeSala(index) { 
+    if (confirm(`Remover permanentemente a sala?`)) { 
+        if (prompt("Senha Master:") === state.config.masterKey) { 
+            state.salas.splice(index, 1); 
+            saveToCloud(); 
+            renderSalasList(); 
+            populateSelectors(); 
+            render(); 
+        } else alert("Senha incorreta."); 
+    } 
+}
+
+// ====================== ADMIN ======================
+function openAdmin() {
+    const pass = prompt("Senha Administrativa:");
+    if (pass === state.config.adminPass) { 
+        openModal('modal-admin'); 
+        refreshAdminData(); 
+    } else { 
+        alert("Acesso Negado."); 
+    }
+}
+
+function switchAdminTab(target) {
+    document.querySelectorAll('.tab-pane').forEach(p => p.classList.remove('active'));
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    
+    const pane = document.getElementById('pane-' + target);
+    if (pane) pane.classList.add('active');
+    
+    const btn = document.getElementById('btn-tab-' + target);
+    if (btn) btn.classList.add('active');
+
+    if (target === 'config') { 
+        resetSalaForm(); 
+        renderSalasList(); 
+    }
+    if (target === 'dashboard' || target === 'rateio' || target === 'auditoria') {
+        refreshAdminData();
+    }
+    if (target === 'ocupacao') {
+        refreshOcupacaoTable();
+    }
+}
+
+function changeSystemPasswords() {
+    const newAdmin = document.getElementById('new-admin-pass').value.trim();
+    const newMaster = document.getElementById('new-master-pass').value.trim();
+    const contra = document.getElementById('sys-contra-senha').value;
+    if (contra !== CONTRA_SENHA_SISTEMA) return alert("Contra Senha Inválida!");
+    if (newAdmin) state.config.adminPass = newAdmin;
+    if (newMaster) state.config.masterKey = newMaster;
+    saveToCloud(); 
+    alert("Senhas atualizadas com sucesso!");
+}
+
+// ====================== PROFISSIONAIS ======================
+function saveProf() {
+    const id = document.getElementById('p-id').value;
+    const nome = document.getElementById('p-nome').value.trim();
+    const pass = document.getElementById('p-pass').value.trim();
+    
+    if (!nome || pass.length < 8) {
+        return alert("Nome e senha (mínimo 8 caracteres) são obrigatórios.");
+    }
+
+    if (!id) {
+        if (prompt("Digite a Senha de Cadastro (Master):") !== state.config.masterKey) {
+            return alert("Senha Master incorreta.");
+        }
+    } else {
+        const profAtual = state.profissionais.find(p => p.id == id);
+        const senhaDigitada = prompt("Digite sua senha pessoal ou senha de Administração:");
+        if (senhaDigitada !== profAtual.pass && senhaDigitada !== state.config.adminPass) {
+            return alert("Senha incorreta. Só o próprio profissional ou o Administrador podem alterar.");
+        }
+    }
+    
+    if (id) {
+        state.profissionais = state.profissionais.map(p => p.id == id ? { ...p, nome, pass } : p);
+    } else {
+        state.profissionais.push({ id: Date.now(), nome, pass });
+    }
+    
+    saveToCloud();
+    resetProfForm();
+    renderProfList();
+    populateSelectors();
+    alert("✅ Profissional salvo com sucesso!");
+}
+
+function editProf(id) {
+    const p = state.profissionais.find(x => x.id == id);
+    if (!p) return;
+    
+    document.getElementById('p-id').value = p.id;
+    document.getElementById('p-nome').value = p.nome;
+    document.getElementById('p-pass').value = p.pass;
+    
+    document.getElementById('btn-cancel-edit').style.display = "inline-flex";
+    document.getElementById('prof-modal-title').innerText = "Editar Profissional";
+}
+
+function removeProf(id) { 
+    if (!confirm("Deseja realmente remover este profissional?")) return;
+    
+    const profAtual = state.profissionais.find(p => p.id === id);
+    const senhaDigitada = prompt("Digite sua senha pessoal ou senha de Administração:");
+    
+    if (senhaDigitada !== profAtual.pass && senhaDigitada !== state.config.adminPass) {
+        return alert("Senha incorreta. Só o próprio profissional ou o Administrador podem excluir.");
+    }
+    
+    state.profissionais = state.profissionais.filter(p => p.id !== id); 
+    saveToCloud();
+    renderProfList();
+    populateSelectors();
+    alert("✅ Profissional removido com sucesso!");
+}
+
+function resetProfForm() { 
+    document.getElementById('p-id').value = "";
+    document.getElementById('p-nome').value = "";
+    document.getElementById('p-pass').value = "";
+    document.getElementById('btn-cancel-edit').style.display = "none";
+    document.getElementById('prof-modal-title').innerText = "Gestão de Profissionais";
+}
+
+function renderProfList() {
+    const tbody = document.getElementById('prof-list-body');
+    if (!tbody) return;
+    
+    tbody.innerHTML = state.profissionais.map(p => `
+        <tr>
+            <td><strong>${p.nome}</strong></td>
+            <td>
+                <button class="btn btn-primary" onclick="editProf(${p.id})">Editar</button>
+                <button class="btn btn-danger" onclick="removeProf(${p.id})">X</button>
+            </td>
+        </tr>
+    `).join('');
+}
+
+// ====================== BOOKING ======================
+function openBooking(date, hour, sala) { 
+    if (!state.profissionais || state.profissionais.length === 0) {
+        alert("Cadastre pelo menos um profissional antes de criar reservas.");
+        return;
+    }
+    
+    state.editingId = null; 
+    
+    const modal = document.getElementById('modal-booking');
+    if (modal) modal.classList.add('active');
+    
+    document.getElementById('f-date').value = date; 
+    document.getElementById('f-start').value = hour; 
+    document.getElementById('f-end').value = hour + 1; 
+    document.getElementById('f-sala').value = sala; 
+    document.getElementById('f-patient').value = '';
+    document.getElementById('f-obs').value = '';
+    document.getElementById('f-status').value = 'confirmado';
+    document.getElementById('f-auth').value = ''; 
+    
+    document.getElementById('f-recurrent').checked = false;
+    document.getElementById('f-recurrent').disabled = false;
+    document.getElementById('recurrent-options').style.display = 'none';
+    
+    populateSelectors();
+    
+    document.getElementById('shared-section').style.display = isPilates(sala) ? 'block' : 'none';
+    if (isPilates(sala)) {
+        populateSegundoProfSelect();
+    }
+    
+    document.getElementById('book-title').innerText = "Nova Reserva";
+}
+
+// ====================== INICIALIZAÇÃO ======================
+window.onload = async () => {
+    // Data inicial
+    document.getElementById('date-picker').value = new Date().toISOString().split('T')[0];
+    document.getElementById('current-label').innerText = new Date().toLocaleDateString('pt-BR', { weekday: 'long', day: 'numeric', month: 'long' });
+    
+    // Tenta carregar do localStorage primeiro (mais rápido)
+    loadFromLocalStorage();
+    
+    // Depois tenta sincronizar com a nuvem
+    // await fetchFromCloud(); // Descomente se quiser carregar automaticamente da nuvem
+    
+    console.log('%cFisioSalas Pro v6.1 Cloud carregado!', 'color:#185FA5; font-size:12px; font-weight:bold');
+};
+</script>
